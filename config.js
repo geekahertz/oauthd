@@ -1,9 +1,9 @@
 module.exports = {
-	host_url: "http://localhost:6284",		// mounted on this url
+	host_url: 'https://' + process.env.OPENSHIFT_APP_DNS,	// mounted on this url
 	base: "/",								// add a base url path. e.g: "/auth"
-	base_api: "/api",						// api base path
-	port: 6284,
-	// bind: "127.0.0.1",					// bind to an ip
+	base_api: "/api",					// api base path
+	port: process.env.OPENSHIFT_NODEJS_PORT || 8080,
+	bind: process.env.OPENSHIFT_NODEJS_IP,			// bind to an ip
 
 	debug: false,							// add stack trace & infos in errors
 
@@ -19,9 +19,9 @@ module.exports = {
 	publicsalt: 'i m another random string, change me.',
 
 	redis: {
-		port: 6379,
-		host: '127.0.0.1',
-		// password: '...my redis password...',
+		port: process.env.OPENSHIFT_REDIS_PORT,
+		host: process.env.OPENSHIFT_REDIS_HOST,
+		password: process.env.REDIS_PASSWORD,
 		// database: ...0~15...
 		// options: {...other options...}
 	},
