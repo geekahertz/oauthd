@@ -18,14 +18,50 @@ async = require 'async'
 qs = require 'querystring'
 Url = require 'url'
 restify = require 'restify'
+request = require 'request'
 
 oauth =
 	oauth1: require '../../lib/oauth1'
 	oauth2: require '../../lib/oauth2'
 
-exports.setup = (callback) ->
+exports.raw = ->
 
 	fixUrl = (ref) -> ref.replace /^([a-zA-Z\-_]+:\/)([^\/])/, '$1/$2'
+
+	@apiRequest = (req, provider_name, oauthio, callback) =>
+		req.headers ?= {}
+		ref = fixUrl(req.headers['referer'] || req.headers['origin'] || "http://localhost");
+		urlinfos = Url.parse(ref)
+		if not urlinfos.hostname
+			return next new restify.InvalidHeaderError 'Missing origin or referer.'
+		async.parallel [
+			(callback) => @db.providers.getExtended provider_name, callback
+			(callback) => @db.apps.getKeyset oauthio.k, provider_name, callback
+			(callback) => @db.apps.checkDomain oauthio.k, ref, callback
+		], (err, results) =>
+			return callback err if err
+			[provider, {parameters}, domaincheck] = results
+
+			req.apiUrl = decodeURIComponent(req.params[1])
+			if ! domaincheck
+				return callback new @check.Error 'Origin "' + ref + '" does not match any registered domain/url on ' + @config.url.host
+
+			# select oauth version
+			oauthv = oauthio.oauthv && {
+				"2":"oauth2"
+				"1":"oauth1"
+			}[oauthio.oauthv]
+			if oauthv and not provider[oauthv]
+				return callback new @check.Error "oauthio_oauthv", "Unsupported oauth version: " + oauthv
+
+			oauthv ?= 'oauth2' if provider.oauth2
+			oauthv ?= 'oauth1' if provider.oauth1
+
+			parameters.oauthio = oauthio
+
+			# let oauth modules do the request
+			oa = new oauth[oauthv](provider, parameters)
+			oa.request req, callback
 
 	doRequest = (req, res, next) =>
 		cb = @server.send(res, next)
@@ -44,39 +80,30 @@ exports.setup = (callback) ->
 		else
 			origin = urlinfos.protocol + '//' + urlinfos.host
 
-		async.parallel [
-			(callback) => @db.providers.getExtended req.params[0], callback
-			(callback) => @db.apps.getKeyset oauthio.k, req.params[0], callback
-			(callback) => @db.apps.checkDomain oauthio.k, ref, callback
-		], (err, results) =>
+		@apiRequest req, req.params[0], oauthio, (err, options) ->
 			return cb err if err
-			[provider, {parameters}, domaincheck] = results
+			api_request = null
 
-			if ! domaincheck
-				return cb new @check.Error 'Origin "' + ref + '" does not match any registered domain/url on ' + @config.url.host
-
-			# select oauth version
-			oauthv = oauthio.oauthv && {
-				"2":"oauth2"
-				"1":"oauth1"
-			}[oauthio.oauthv]
-			if oauthv and not provider[oauthv]
-				return cb new @check.Error "oauthio_oauthv", "Unsupported oauth version: " + oauthv
-			oauthv ?= 'oauth2' if provider.oauth2
-			oauthv ?= 'oauth1' if provider.oauth1
-			oa = new oauth[oauthv]
-
-			parameters.oauthio = oauthio
-
-			# let oauth modules do the request
-			oa.request provider, parameters, req, (err, api_request) ->
-				return cb err if err
-
+			sendres = ->
 				api_request.pipefilter = (response, dest) ->
 					dest.setHeader 'Access-Control-Allow-Origin', origin
 					dest.setHeader 'Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE'
 				api_request.pipe(res)
 				api_request.once 'end', -> next false
+
+			if req.headers['content-type'] and req.headers['content-type'].indexOf('application/x-www-form-urlencoded') != -1
+				bodyParser = restify.bodyParser mapParams:false
+				bodyParser[0] req, res, -> bodyParser[1] req, res, ->
+					options.form = req.body
+					delete options.headers['Content-Length']
+					api_request = request options
+					sendres()
+			else
+				api_request = request options
+				delete req.headers
+				api_request = req.pipe(api_request)
+				sendres()
+
 
 	@server.opts new RegExp('^' + @config.base + '/request/([a-zA-Z0-9_\\.~-]+)/(.*)$'), (req, res, next) ->
 		origin = null
@@ -102,4 +129,5 @@ exports.setup = (callback) ->
 	@server.patch new RegExp('^' + @config.base + '/request/([a-zA-Z0-9_\\.~-]+)/(.*)$'), doRequest
 	@server.del new RegExp('^' + @config.base + '/request/([a-zA-Z0-9_\\.~-]+)/(.*)$'), doRequest
 
-	callback();
+	user_endpoints_register = require ('./endpoints/user')
+	user_endpoints_register @server, doRequest
